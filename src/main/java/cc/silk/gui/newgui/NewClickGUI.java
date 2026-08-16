@@ -19,7 +19,7 @@ import java.util.List;
 public class NewClickGUI extends Screen {
     private final List<CategoryPanel> panels = new ArrayList<>();
     private ConfigPanel configPanel;
-    private static final int PANEL_WIDTH = 110;
+    private static final int PANEL_WIDTH = 90;
     private static final int PANEL_SPACING = 5;
 
     private float animationProgress = 0f;
