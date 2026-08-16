@@ -99,7 +99,7 @@ public class NewClickGUI extends Screen {
             }
         }
 
-        float scale = easeOutCubic(animationProgress) * 0.75f;
+        float scale = easeOutCubic(animationProgress) * 0.6f;
         float alpha = animationProgress;
 
         float targetExpand = (searchFocused || !searchQuery.isEmpty()) ? 1f : 0f;
