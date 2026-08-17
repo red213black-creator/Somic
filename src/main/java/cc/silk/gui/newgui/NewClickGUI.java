@@ -318,6 +318,9 @@ public class NewClickGUI extends Screen {
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        float mouseScale = Math.max(easeOutCubic(animationProgress) * 0.6f, 0.001f);
+mouseX /= mouseScale;
+mouseY /= mouseScale;
         if (button == 0 && mouseX >= friendsButtonX && mouseX <= friendsButtonX + FRIENDS_BUTTON_SIZE &&
                 mouseY >= friendsButtonY && mouseY <= friendsButtonY + FRIENDS_BUTTON_SIZE) {
             if (client != null) {
