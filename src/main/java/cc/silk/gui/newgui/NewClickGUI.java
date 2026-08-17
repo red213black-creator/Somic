@@ -429,6 +429,9 @@ mouseY /= mouseScale;
 
     @Override
     public boolean mouseReleased(double mouseX, double mouseY, int button) {
+        float mouseScale = Math.max(easeOutCubic(animationProgress) * 0.6f, 0.001f);
+mouseX /= mouseScale;
+mouseY /= mouseScale;
         if (configPanel != null) {
             configPanel.mouseReleased(mouseX, mouseY, button);
         }
@@ -441,6 +444,11 @@ mouseY /= mouseScale;
 
     @Override
     public boolean mouseDragged(double mouseX, double mouseY, int button, double deltaX, double deltaY) {
+        float mouseScale = Math.max(easeOutCubic(animationProgress) * 0.6f, 0.001f);
+mouseX /= mouseScale;
+mouseY /= mouseScale;
+deltaX /= mouseScale;
+deltaY /= mouseScale;
         if (configPanel != null && configPanel.mouseDragged(mouseX, mouseY, button, deltaX, deltaY)) {
             return true;
         }
@@ -455,6 +463,9 @@ mouseY /= mouseScale;
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
+        float mouseScale = Math.max(easeOutCubic(animationProgress) * 0.6f, 0.001f);
+mouseX /= mouseScale;
+mouseY /= mouseScale;
         if (configPanel != null && configPanel.mouseScrolled(mouseX, mouseY, verticalAmount)) {
             return true;
         }
