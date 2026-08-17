@@ -8,7 +8,7 @@ import cc.silk.module.setting.NumberSetting;
 
 import meteordevelopment.orbit.EventHandler;
 
-import net.minecraft.client.gui.screen.ingame.ChestScreen;
+import net.minecraft.client.gui.screen.ingame.GenericContainerScreen;
 import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
 
@@ -40,7 +40,7 @@ public final class ChestStealer extends Module {
             return;
         }
 
-        if (!(mc.currentScreen instanceof ChestScreen)) {
+        if (!(mc.currentScreen instanceof GenericContainerScreen)) {
             return;
         }
 
