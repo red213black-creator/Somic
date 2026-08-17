@@ -37,7 +37,7 @@ public final class TriggerBot extends Module {
     public static final RangeSetting axePostDelay = new RangeSetting("Axe Post Delay", 1, 500, 120, 120, 0.5);
     public static final RangeSetting reactionTime = new RangeSetting("Reaction Time", 1, 350, 20, 95, 0.5);
     public static final ModeSetting cooldownMode = new ModeSetting("Cooldown Mode", "Smart", "Smart", "Strict", "None");
-    public static final ModeSetting critMode = new ModeSetting("Criticals", "Strict", "None", "Strict");
+    public static final BooleanSetting onlyCrits = new BooleanSetting("Only Crits", true);
     public static final BooleanSetting ignorePassiveMobs = new BooleanSetting("No Passive", true);
     public static final BooleanSetting ignoreInvisible = new BooleanSetting("No Invisible", true);
     public static final BooleanSetting ignoreCrystals = new BooleanSetting("No Crystals", true);
@@ -65,7 +65,7 @@ public final class TriggerBot extends Module {
         addSettings(
                 swordThreshold, axeThreshold,
                 axePostDelay, reactionTime,
-                cooldownMode, critMode, ignorePassiveMobs, ignoreCrystals, respectShields,
+                cooldownMode, onlyCrits, ignorePassiveMobs, ignoreCrystals, respectShields,
                 ignoreInvisible, onlyWhenMouseDown, useOnlySwordOrAxe,
                 disableOnWorldChange, samePlayer);
     }
@@ -138,7 +138,7 @@ public final class TriggerBot extends Module {
         }
 
         if (waitingForReaction && timerReactionTime.hasElapsedTime(currentReactionDelay, true)) {
-            if (critMode.getMode().equals("Strict")) {
+            if (onlyCrits.getValue()) {
                 if (!mc.player.isOnGround() && !mc.player.isClimbing()) {
                     if (canCrit() && mc.player.getAttackCooldownProgress(0.0f) >= swordThreshold.getMinValue()) {
                         if (hasTarget(target) && samePlayerCheck(target)) {
@@ -191,9 +191,8 @@ public final class TriggerBot extends Module {
         if (mc.player == null || mc.world == null)
             return false;
 
-        String mode = critMode.getMode();
-        if (mode.equals("None"))
-            return false;
+        if (!onlyCrits.getValue())
+    return false;
 
         if (mc.player.hasStatusEffect(StatusEffects.LEVITATION)
                 || mc.player.hasStatusEffect(StatusEffects.SLOW_FALLING)
@@ -226,7 +225,7 @@ public final class TriggerBot extends Module {
         }
 
         boolean cooldownReady = mc.player.getAttackCooldownProgress(0.0f) >= swordThreshold.getMinValue();
-        return mode.equals("Strict") && cooldownReady && canCrit();
+        return onlyCrits.getValue() && cooldownReady && canCrit();
     }
 
     private boolean hasElapsedDelay() {
