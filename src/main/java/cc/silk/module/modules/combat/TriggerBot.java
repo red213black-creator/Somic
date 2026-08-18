@@ -14,8 +14,6 @@ import cc.silk.utils.math.MathUtils;
 import cc.silk.utils.math.TimerUtil;
 import cc.silk.utils.mc.CombatUtil;
 import meteordevelopment.orbit.EventHandler;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.Tameable;
 import net.minecraft.entity.decoration.EndCrystalEntity;
@@ -46,8 +44,25 @@ public final class TriggerBot extends Module {
     public static final ModeSetting cooldownMode =
             new ModeSetting("Cooldown Mode", "Smart", "Smart", "Strict", "None");
 
-    public static final BooleanSetting onlyCrits =
-            new BooleanSetting("Only Crits", true);
+    /*
+     * Off:
+     * обычный TriggerBot.
+     *
+     * Only Crits:
+     * атака только когда игрок находится в настоящем критическом состоянии.
+     *
+     * Smart Crits:
+     * если игрок уже находится в критическом состоянии - атакует;
+     * если нет - может выполнить обычную атаку после готовности cooldown.
+     */
+    public static final ModeSetting critMode =
+            new ModeSetting(
+                    "Crit Mode",
+                    "Only Crits",
+                    "Off",
+                    "Only Crits",
+                    "Smart Crits"
+            );
 
     public static final BooleanSetting ignorePassiveMobs =
             new BooleanSetting("No Passive", true);
@@ -73,22 +88,34 @@ public final class TriggerBot extends Module {
     public static final BooleanSetting samePlayer =
             new BooleanSetting("Same Player", false);
 
-    private final TimerUtil timer = new TimerUtil();
-    private final TimerUtil samePlayerTimer = new TimerUtil();
-    private final TimerUtil timerReactionTime = new TimerUtil();
-
-    public boolean waitingForDelay = false;
-
-    private boolean waitingForReaction = false;
-    private long currentReactionDelay = 0;
-    private float randomizedPostDelay = 0;
-    private float randomizedThreshold = 0;
+    private final TimerUtil reactionTimer = new TimerUtil();
+    private final TimerUtil axeTimer = new TimerUtil();
 
     private Entity target;
+
     private String lastTargetUUID = null;
 
+    private boolean waitingForReaction = false;
+
+    private long currentReactionDelay = 0L;
+
+    /*
+     * Threshold выбирается один раз для текущего цикла атаки.
+     * Он НЕ меняется каждый тик.
+     */
+    private float currentSwordThreshold = -1.0f;
+    private float currentAxeThreshold = -1.0f;
+    private float currentAxePostDelay = -1.0f;
+
+    private boolean axeDelayStarted = false;
+
     public TriggerBot() {
-        super("Trigger Bot", "Makes you automatically attack once aimed at a target", -1, Category.COMBAT);
+        super(
+                "Trigger Bot",
+                "Makes you automatically attack once aimed at a target",
+                -1,
+                Category.COMBAT
+        );
 
         addSettings(
                 swordThreshold,
@@ -96,7 +123,7 @@ public final class TriggerBot extends Module {
                 axePostDelay,
                 reactionTime,
                 cooldownMode,
-                onlyCrits,
+                critMode,
                 ignorePassiveMobs,
                 ignoreCrystals,
                 respectShields,
@@ -110,6 +137,8 @@ public final class TriggerBot extends Module {
 
     @EventHandler
     private void onWorldChangeEvent(WorldChangeEvent event) {
+        resetState();
+
         if (disableOnWorldChange.getValue() && this.isEnabled()) {
             this.toggle();
         }
@@ -117,263 +146,587 @@ public final class TriggerBot extends Module {
 
     @EventHandler
     private void tick(TickEvent event) {
-        if (isNull())
+        if (isNull()) {
+            resetState();
             return;
+        }
 
-        assert mc.player != null;
-
-        if (mc.player.isUsingItem())
+        if (mc.player == null || mc.world == null) {
+            resetState();
             return;
+        }
 
-        if (mc.currentScreen != null)
+        /*
+         * Во время использования предмета не атакуем.
+         */
+        if (mc.player.isUsingItem()) {
+            resetState();
             return;
+        }
 
-        // Берём только ту сущность, на которую реально наведён прицел.
-        target = mc.targetedEntity;
-
-        if (!(mc.crosshairTarget instanceof EntityHitResult hitResult))
+        /*
+         * Во время GUI тоже ничего не делаем.
+         */
+        if (mc.currentScreen != null) {
+            resetState();
             return;
+        }
 
-        Entity crosshairEntity = hitResult.getEntity();
-
-        // Никакого поиска ближайших целей.
-        if (target == null || crosshairEntity != target)
+        /*
+         * Проверяем оружие.
+         */
+        if (!isHoldingSwordOrAxe()) {
+            resetState();
             return;
+        }
 
-        if (!isHoldingSwordOrAxe())
-            return;
-
+        /*
+         * Если включён режим "Only Mouse Hold",
+         * ЛКМ должен быть зажат.
+         */
         if (onlyWhenMouseDown.getValue()
                 && GLFW.glfwGetMouseButton(
                 mc.getWindow().getHandle(),
                 GLFW.GLFW_MOUSE_BUTTON_LEFT
         ) != GLFW.GLFW_PRESS) {
+            resetState();
             return;
         }
 
-        if (!hasTarget(target))
-            return;
-
-        if (respectShields.getValue()) {
-            Item item = mc.player.getMainHandStack().getItem();
-
-            if (target instanceof PlayerEntity playerTarget
-                    && CombatUtil.isShieldFacingAway(playerTarget)
-                    && item instanceof SwordItem) {
-                return;
-            }
-        }
-
-        if (!target.getUuidAsString().equals(lastTargetUUID)) {
-            lastTargetUUID = target.getUuidAsString();
-        }
-
-        if (!waitingForReaction) {
-            waitingForReaction = true;
-            timerReactionTime.reset();
-
-            long delay;
-
-            switch (cooldownMode.getMode()) {
-                case "Smart" -> {
-                    double distance = mc.player.distanceTo(target);
-                    double maxDistance = 3.0;
-                    double multiplier = distance < maxDistance / 2 ? 0.66 : 1.0;
-
-                    delay = (long) MathUtils.randomDoubleBetween(
-                            reactionTime.getMinValue(),
-                            reactionTime.getMaxValue()
-                    );
-
-                    delay *= (long) multiplier;
-                }
-
-                case "None" -> delay = 0;
-
-                default -> delay = (long) MathUtils.randomDoubleBetween(
-                        reactionTime.getMinValue(),
-                        reactionTime.getMaxValue()
-                );
-            }
-
-            currentReactionDelay = delay;
-        }
-
-        if (!waitingForReaction
-                || !timerReactionTime.hasElapsedTime(currentReactionDelay, true)) {
+        /*
+         * Получаем сущность непосредственно из текущего raycast.
+         */
+        if (!(mc.crosshairTarget instanceof EntityHitResult hitResult)) {
+            resetState();
             return;
         }
 
-        // Only Crits:
-        // стоим на земле -> не атакуем
-        // летим вверх -> не атакуем
-        // начали падать -> проверяем возможность крита
-        if (onlyCrits.getValue()) {
-            if (!canCrit())
-                return;
+        Entity crosshairEntity = hitResult.getEntity();
 
-            if (!isCrosshairTarget(target))
-                return;
+        /*
+         * Если цель изменилась — начинаем новый цикл.
+         */
+        if (target != crosshairEntity) {
+            target = crosshairEntity;
+            startNewTargetCycle(target);
+        }
 
-            if (!hasElapsedDelay())
-                return;
-
-            if (!samePlayerCheck(target))
-                return;
-
-            attack();
-            waitingForReaction = false;
+        if (!hasTarget(target)) {
+            resetState();
             return;
         }
 
-        // Обычный режим TriggerBot.
-        if (hasElapsedDelay()
-                && isCrosshairTarget(target)
-                && samePlayerCheck(target)) {
-            attack();
-            waitingForReaction = false;
-        }
-    }
-
-    private boolean isCrosshairTarget(Entity entity) {
-        if (entity == null)
-            return false;
-
-        if (!(mc.crosshairTarget instanceof EntityHitResult hitResult))
-            return false;
-
-        return hitResult.getEntity() == entity;
-    }
-
-    private boolean samePlayerCheck(Entity entity) {
-        if (!samePlayer.getValue())
-            return true;
-
-        if (entity == null)
-            return false;
-
-        if (lastTargetUUID == null || samePlayerTimer.hasElapsedTime(3000, false)) {
-            lastTargetUUID = entity.getUuidAsString();
-            samePlayerTimer.reset();
-            return true;
+        /*
+         * Защита от щита.
+         */
+        if (respectShields.getValue()
+                && target instanceof PlayerEntity playerTarget
+                && CombatUtil.isShieldFacingAway(playerTarget)
+                && mc.player.getMainHandStack().getItem() instanceof SwordItem) {
+            resetAttackCycle();
+            return;
         }
 
-        return entity.getUuidAsString().equals(lastTargetUUID);
-    }
-
-    private boolean canCrit() {
-        if (mc.player == null)
-            return false;
-
-        return !mc.player.isOnGround()
-                && !mc.player.isClimbing()
-                && !mc.player.isInLava()
-                && !mc.player.hasStatusEffect(StatusEffects.BLINDNESS)
-                && mc.player.fallDistance > 0.065f
-                && mc.player.getVehicle() == null;
-    }
-
-    private boolean hasElapsedDelay() {
-        assert mc.player != null;
-
-        Item heldItem = mc.player.getMainHandStack().getItem();
-
-        float cooldown = mc.player.getAttackCooldownProgress(0.0f);
-
-        if (heldItem instanceof AxeItem) {
-            if (!waitingForDelay) {
-                randomizedThreshold = (float) MathUtils.randomDoubleBetween(
-                        axeThreshold.getMinValue(),
-                        axeThreshold.getMaxValue()
-                );
-
-                randomizedPostDelay = (float) MathUtils.randomDoubleBetween(
-                        axePostDelay.getMinValue(),
-                        axePostDelay.getMaxValue()
-                );
-
-                waitingForDelay = true;
-            }
-
-            if (cooldown >= randomizedThreshold) {
-                if (timer.hasElapsedTime((long) randomizedPostDelay, true)) {
-                    waitingForDelay = false;
-                    return true;
-                }
-            } else {
-                timer.reset();
-            }
-
-            return false;
+        /*
+         * Reaction Time.
+         */
+        if (!isReactionReady()) {
+            return;
         }
 
-        float swordDelay = (float) MathUtils.randomDoubleBetween(
+        /*
+         * Перед атакой ещё раз убеждаемся,
+         * что прицел всё ещё на той же цели.
+         */
+        if (!isCrosshairTarget(target)) {
+            resetState();
+            return;
+        }
+
+        /*
+         * Главная логика критов.
+         */
+        if (!canAttackAccordingToCritMode()) {
+            return;
+        }
+
+        /*
+         * Cooldown / threshold.
+         */
+        if (!hasElapsedDelay()) {
+            return;
+        }
+
+        /*
+         * Финальная проверка.
+         */
+        if (!isCrosshairTarget(target) || !hasTarget(target)) {
+            resetState();
+            return;
+        }
+
+        attack();
+    }
+
+    /**
+     * Запускает новый цикл для новой цели.
+     */
+    private void startNewTargetCycle(Entity entity) {
+        waitingForReaction = true;
+
+        reactionTimer.reset();
+
+        currentReactionDelay = calculateReactionDelay();
+
+        currentSwordThreshold = randomThreshold(
                 swordThreshold.getMinValue(),
                 swordThreshold.getMaxValue()
         );
 
-        return cooldown >= swordDelay;
+        currentAxeThreshold = randomThreshold(
+                axeThreshold.getMinValue(),
+                axeThreshold.getMaxValue()
+        );
+
+        currentAxePostDelay = randomThreshold(
+                axePostDelay.getMinValue(),
+                axePostDelay.getMaxValue()
+        );
+
+        axeDelayStarted = false;
+
+        if (entity != null) {
+            lastTargetUUID = entity.getUuidAsString();
+        }
+    }
+
+    /**
+     * Reaction Time рассчитывается один раз при появлении цели.
+     */
+    private long calculateReactionDelay() {
+        double delay = MathUtils.randomDoubleBetween(
+                reactionTime.getMinValue(),
+                reactionTime.getMaxValue()
+        );
+
+        switch (cooldownMode.getMode()) {
+            case "Smart" -> {
+                if (mc.player != null && target != null) {
+                    double distance = mc.player.distanceTo(target);
+
+                    /*
+                     * Чем ближе цель, тем меньше дополнительная
+                     * реакционная задержка.
+                     */
+                    if (distance < 1.5) {
+                        delay *= 0.66;
+                    }
+                }
+            }
+
+            case "None" -> delay = 0;
+
+            case "Strict" -> {
+                /*
+                 * Ничего дополнительно не уменьшаем.
+                 */
+            }
+        }
+
+        return Math.max(0L, Math.round(delay));
+    }
+
+    /**
+     * Проверка Reaction Time.
+     */
+    private boolean isReactionReady() {
+        if (!waitingForReaction) {
+            return true;
+        }
+
+        if (currentReactionDelay <= 0) {
+            waitingForReaction = false;
+            return true;
+        }
+
+        if (reactionTimer.hasElapsedTime(currentReactionDelay, true)) {
+            waitingForReaction = false;
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Проверяет выбранный Crit Mode.
+     */
+    private boolean canAttackAccordingToCritMode() {
+        String mode = critMode.getMode();
+
+        switch (mode) {
+            case "Only Crits":
+                return canCrit();
+
+            case "Smart Crits":
+                /*
+                 * Если игрок уже находится в настоящем критическом
+                 * состоянии — атакуем как крит.
+                 *
+                 * Если критического состояния нет, Smart Crits
+                 * разрешает обычную атаку при готовом cooldown.
+                 */
+                return true;
+
+            case "Off":
+            default:
+                return true;
+        }
+    }
+
+    /**
+     * Проверяет, может ли текущая атака быть критической
+     * по обычным игровым условиям.
+     */
+    private boolean canCrit() {
+        if (mc.player == null) {
+            return false;
+        }
+
+        /*
+         * На земле крит невозможен.
+         */
+        if (mc.player.isOnGround()) {
+            return false;
+        }
+
+        /*
+         * Во время подъёма прыжка крит не делаем.
+         */
+        if (mc.player.getVelocity().y >= 0.0) {
+            return false;
+        }
+
+        /*
+         * Должно быть фактическое падение.
+         */
+        if (mc.player.fallDistance <= 0.065f) {
+            return false;
+        }
+
+        /*
+         * Состояния, при которых обычный крит невозможен.
+         */
+        if (mc.player.isClimbing()) {
+            return false;
+        }
+
+        if (mc.player.isInLava()) {
+            return false;
+        }
+
+        if (mc.player.isTouchingWater()) {
+            return false;
+        }
+
+        if (mc.player.hasStatusEffect(StatusEffects.BLINDNESS)) {
+            return false;
+        }
+
+        if (mc.player.getVehicle() != null) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Проверяет cooldown оружия.
+     */
+    private boolean hasElapsedDelay() {
+        if (mc.player == null) {
+            return false;
+        }
+
+        Item heldItem = mc.player.getMainHandStack().getItem();
+
+        /*
+         * Если cooldown mode = None,
+         * cooldown вообще не блокирует атаку.
+         */
+        if ("None".equals(cooldownMode.getMode())) {
+            return true;
+        }
+
+        float cooldown = mc.player.getAttackCooldownProgress(0.0f);
+
+        if (heldItem instanceof AxeItem) {
+            return checkAxeCooldown(cooldown);
+        }
+
+        if (heldItem instanceof SwordItem) {
+            return checkSwordCooldown(cooldown);
+        }
+
+        return true;
+    }
+
+    private boolean checkSwordCooldown(float cooldown) {
+        /*
+         * Threshold создаётся при начале цикла.
+         */
+        if (currentSwordThreshold < 0.0f) {
+            currentSwordThreshold = randomThreshold(
+                    swordThreshold.getMinValue(),
+                    swordThreshold.getMaxValue()
+            );
+        }
+
+        if (cooldown < currentSwordThreshold) {
+            return false;
+        }
+
+        return true;
+    }
+
+    private boolean checkAxeCooldown(float cooldown) {
+        if (currentAxeThreshold < 0.0f) {
+            currentAxeThreshold = randomThreshold(
+                    axeThreshold.getMinValue(),
+                    axeThreshold.getMaxValue()
+            );
+        }
+
+        if (currentAxePostDelay < 0.0f) {
+            currentAxePostDelay = randomThreshold(
+                    axePostDelay.getMinValue(),
+                    axePostDelay.getMaxValue()
+            );
+        }
+
+        /*
+         * Сначала ждём cooldown.
+         */
+        if (cooldown < currentAxeThreshold) {
+            axeDelayStarted = false;
+            axeTimer.reset();
+            return false;
+        }
+
+        /*
+         * Cooldown готов — запускаем Post Delay.
+         */
+        if (!axeDelayStarted) {
+            axeDelayStarted = true;
+            axeTimer.reset();
+            return false;
+        }
+
+        /*
+         * Теперь ждём заданную задержку.
+         */
+        if (!axeTimer.hasElapsedTime(
+                Math.max(0L, Math.round(currentAxePostDelay)),
+                true
+        )) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Проверка, что прицел всё ещё на конкретной сущности.
+     */
+    private boolean isCrosshairTarget(Entity entity) {
+        if (entity == null) {
+            return false;
+        }
+
+        if (!(mc.crosshairTarget instanceof EntityHitResult hitResult)) {
+            return false;
+        }
+
+        return hitResult.getEntity() == entity;
+    }
+
+    /**
+     * Same Player.
+     */
+    private boolean samePlayerCheck(Entity entity) {
+        if (!samePlayer.getValue()) {
+            return true;
+        }
+
+        if (entity == null) {
+            return false;
+        }
+
+        String uuid = entity.getUuidAsString();
+
+        if (lastTargetUUID == null) {
+            lastTargetUUID = uuid;
+            return true;
+        }
+
+        return lastTargetUUID.equals(uuid);
+    }
+
+    private float randomThreshold(double min, double max) {
+        return (float) MathUtils.randomDoubleBetween(min, max);
     }
 
     private boolean isHoldingSwordOrAxe() {
-        if (!useOnlySwordOrAxe.getValue())
+        if (!useOnlySwordOrAxe.getValue()) {
             return true;
+        }
 
-        assert mc.player != null;
+        if (mc.player == null) {
+            return false;
+        }
 
         Item item = mc.player.getMainHandStack().getItem();
 
         return item instanceof AxeItem || item instanceof SwordItem;
     }
 
+    /**
+     * Выполняет обычную атаку клиента.
+     */
     public void attack() {
-        ((MinecraftClientAccessor) mc).invokeDoAttack();
-
-        if (samePlayer.getValue() && target != null) {
-            lastTargetUUID = target.getUuidAsString();
-            samePlayerTimer.reset();
+        if (mc.player == null || target == null) {
+            return;
         }
 
-        waitingForDelay = false;
+        if (!isCrosshairTarget(target)) {
+            resetState();
+            return;
+        }
+
+        ((MinecraftClientAccessor) mc).invokeDoAttack();
+
+        /*
+         * После атаки начинаем новый attack cycle.
+         */
+        waitingForReaction = false;
+
+        currentSwordThreshold = -1.0f;
+        currentAxeThreshold = -1.0f;
+        currentAxePostDelay = -1.0f;
+
+        axeDelayStarted = false;
+
+        axeTimer.reset();
+        reactionTimer.reset();
+
+        if (samePlayer.getValue()) {
+            lastTargetUUID = target.getUuidAsString();
+        }
     }
 
-    public boolean hasTarget(Entity en) {
-        if (en == mc.player || en == mc.cameraEntity || !en.isAlive())
+    /**
+     * Проверяет, является ли сущность допустимой целью.
+     */
+    public boolean hasTarget(Entity entity) {
+        if (entity == null) {
             return false;
+        }
 
-        if (en instanceof PlayerEntity player
-                && FriendManager.isFriend(player.getUuid()))
+        if (mc.player == null) {
             return false;
+        }
 
-        if (Teams.isTeammate(en))
+        if (entity == mc.player || entity == mc.cameraEntity) {
             return false;
+        }
 
-        if (en instanceof WindChargeEntity)
+        if (!entity.isAlive()) {
             return false;
+        }
 
-        return switch (en) {
-            case EndCrystalEntity ignored when ignoreCrystals.getValue() -> false;
-            case Tameable ignored -> false;
-            case PassiveEntity ignored when ignorePassiveMobs.getValue() -> false;
-            default -> !ignoreInvisible.getValue() || !en.isInvisible();
-        };
+        if (entity instanceof PlayerEntity player
+                && FriendManager.isFriend(player.getUuid())) {
+            return false;
+        }
+
+        if (Teams.isTeammate(entity)) {
+            return false;
+        }
+
+        if (entity instanceof WindChargeEntity) {
+            return false;
+        }
+
+        if (entity instanceof EndCrystalEntity
+                && ignoreCrystals.getValue()) {
+            return false;
+        }
+
+        if (entity instanceof Tameable) {
+            return false;
+        }
+
+        if (entity instanceof PassiveEntity
+                && ignorePassiveMobs.getValue()) {
+            return false;
+        }
+
+        if (ignoreInvisible.getValue() && entity.isInvisible()) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Полный сброс состояния.
+     */
+    private void resetState() {
+        target = null;
+
+        waitingForReaction = false;
+
+        currentReactionDelay = 0L;
+
+        currentSwordThreshold = -1.0f;
+        currentAxeThreshold = -1.0f;
+        currentAxePostDelay = -1.0f;
+
+        axeDelayStarted = false;
+
+        reactionTimer.reset();
+        axeTimer.reset();
+    }
+
+    /**
+     * Сбрасывает только текущий attack cycle,
+     * не уничтожая информацию о цели.
+     */
+    private void resetAttackCycle() {
+        waitingForReaction = false;
+
+        currentSwordThreshold = -1.0f;
+        currentAxeThreshold = -1.0f;
+        currentAxePostDelay = -1.0f;
+
+        axeDelayStarted = false;
+
+        reactionTimer.reset();
+        axeTimer.reset();
     }
 
     @Override
     public void onEnable() {
-        timer.reset();
-        timerReactionTime.reset();
-        waitingForReaction = false;
-        waitingForDelay = false;
+        resetState();
+        lastTargetUUID = null;
+
         super.onEnable();
     }
 
     @Override
     public void onDisable() {
-        timer.reset();
-        timerReactionTime.reset();
-        waitingForReaction = false;
-        waitingForDelay = false;
+        resetState();
+        lastTargetUUID = null;
+
         super.onDisable();
     }
 }
