@@ -42,19 +42,14 @@ public final class TriggerBot extends Module {
             new RangeSetting("Reaction Time", 1, 350, 20, 95, 0.5);
 
     public static final ModeSetting cooldownMode =
-            new ModeSetting("Cooldown Mode", "Smart", "Smart", "Strict", "None");
+            new ModeSetting(
+                    "Cooldown Mode",
+                    "Smart",
+                    "Smart",
+                    "Strict",
+                    "None"
+            );
 
-    /*
-     * Off:
-     * обычный TriggerBot.
-     *
-     * Only Crits:
-     * атака только когда игрок находится в настоящем критическом состоянии.
-     *
-     * Smart Crits:
-     * если игрок уже находится в критическом состоянии - атакует;
-     * если нет - может выполнить обычную атаку после готовности cooldown.
-     */
     public static final ModeSetting critMode =
             new ModeSetting(
                     "Crit Mode",
@@ -88,26 +83,23 @@ public final class TriggerBot extends Module {
     public static final BooleanSetting samePlayer =
             new BooleanSetting("Same Player", false);
 
+    private final TimerUtil timer = new TimerUtil();
     private final TimerUtil reactionTimer = new TimerUtil();
     private final TimerUtil axeTimer = new TimerUtil();
 
-    private Entity target;
-
-    private String lastTargetUUID = null;
+    public boolean waitingForDelay = false;
 
     private boolean waitingForReaction = false;
 
     private long currentReactionDelay = 0L;
 
-    /*
-     * Threshold выбирается один раз для текущего цикла атаки.
-     * Он НЕ меняется каждый тик.
-     */
     private float currentSwordThreshold = -1.0f;
     private float currentAxeThreshold = -1.0f;
     private float currentAxePostDelay = -1.0f;
 
-    private boolean axeDelayStarted = false;
+    private Entity target;
+
+    private String lastTargetUUID = null;
 
     public TriggerBot() {
         super(
@@ -157,18 +149,18 @@ public final class TriggerBot extends Module {
         }
 
         /*
-         * Во время использования предмета не атакуем.
+         * Не атакуем во время использования предмета.
          */
         if (mc.player.isUsingItem()) {
-            resetState();
+            resetAttackState();
             return;
         }
 
         /*
-         * Во время GUI тоже ничего не делаем.
+         * Не работаем поверх GUI.
          */
         if (mc.currentScreen != null) {
-            resetState();
+            resetAttackState();
             return;
         }
 
@@ -176,92 +168,105 @@ public final class TriggerBot extends Module {
          * Проверяем оружие.
          */
         if (!isHoldingSwordOrAxe()) {
-            resetState();
+            resetAttackState();
             return;
         }
 
         /*
-         * Если включён режим "Only Mouse Hold",
-         * ЛКМ должен быть зажат.
+         * Only Mouse Hold.
          */
         if (onlyWhenMouseDown.getValue()
                 && GLFW.glfwGetMouseButton(
                 mc.getWindow().getHandle(),
                 GLFW.GLFW_MOUSE_BUTTON_LEFT
         ) != GLFW.GLFW_PRESS) {
-            resetState();
+
+            resetAttackState();
             return;
         }
 
         /*
-         * Получаем сущность непосредственно из текущего raycast.
+         * Получаем именно сущность под прицелом.
          */
         if (!(mc.crosshairTarget instanceof EntityHitResult hitResult)) {
-            resetState();
+            resetAttackState();
             return;
         }
 
-        Entity crosshairEntity = hitResult.getEntity();
+        Entity newTarget = hitResult.getEntity();
 
         /*
          * Если цель изменилась — начинаем новый цикл.
          */
-        if (target != crosshairEntity) {
-            target = crosshairEntity;
-            startNewTargetCycle(target);
+        if (target != newTarget) {
+            target = newTarget;
+            startTargetCycle(target);
         }
 
         if (!hasTarget(target)) {
-            resetState();
+            resetAttackState();
             return;
         }
 
         /*
-         * Защита от щита.
+         * Если включена проверка щита.
          */
         if (respectShields.getValue()
                 && target instanceof PlayerEntity playerTarget
-                && CombatUtil.isShieldFacingAway(playerTarget)
-                && mc.player.getMainHandStack().getItem() instanceof SwordItem) {
-            resetAttackCycle();
+                && mc.player.getMainHandStack().getItem() instanceof SwordItem
+                && CombatUtil.isShieldFacingAway(playerTarget)) {
+
             return;
         }
 
         /*
-         * Reaction Time.
+         * Reaction Time применяется только к обычному режиму.
+         *
+         * Для Only Crits не блокируем критическое окно лишней
+         * задержкой, иначе можно просто пропустить момент крита.
          */
-        if (!isReactionReady()) {
-            return;
+        if (!"Only Crits".equals(critMode.getMode())) {
+            if (!isReactionReady()) {
+                return;
+            }
         }
 
         /*
-         * Перед атакой ещё раз убеждаемся,
-         * что прицел всё ещё на той же цели.
+         * Проверяем, что мы всё ещё смотрим именно на эту цель.
          */
         if (!isCrosshairTarget(target)) {
-            resetState();
+            resetAttackState();
             return;
         }
 
         /*
-         * Главная логика критов.
+         * Проверяем режим критов.
          */
-        if (!canAttackAccordingToCritMode()) {
+        if (!canAttackByCritMode()) {
             return;
         }
 
         /*
-         * Cooldown / threshold.
+         * Проверяем cooldown оружия.
          */
         if (!hasElapsedDelay()) {
             return;
         }
 
         /*
-         * Финальная проверка.
+         * Финальная проверка перед атакой.
          */
-        if (!isCrosshairTarget(target) || !hasTarget(target)) {
-            resetState();
+        if (!isCrosshairTarget(target)) {
+            resetAttackState();
+            return;
+        }
+
+        if (!hasTarget(target)) {
+            resetAttackState();
+            return;
+        }
+
+        if (!samePlayerCheck(target)) {
             return;
         }
 
@@ -269,15 +274,19 @@ public final class TriggerBot extends Module {
     }
 
     /**
-     * Запускает новый цикл для новой цели.
+     * Начинает новый цикл при появлении цели.
      */
-    private void startNewTargetCycle(Entity entity) {
+    private void startTargetCycle(Entity entity) {
         waitingForReaction = true;
 
         reactionTimer.reset();
 
         currentReactionDelay = calculateReactionDelay();
 
+        /*
+         * Threshold выбирается ОДИН раз.
+         * Он больше не меняется каждый тик.
+         */
         currentSwordThreshold = randomThreshold(
                 swordThreshold.getMinValue(),
                 swordThreshold.getMaxValue()
@@ -293,7 +302,9 @@ public final class TriggerBot extends Module {
                 axePostDelay.getMaxValue()
         );
 
-        axeDelayStarted = false;
+        waitingForDelay = false;
+
+        axeTimer.reset();
 
         if (entity != null) {
             lastTargetUUID = entity.getUuidAsString();
@@ -301,35 +312,34 @@ public final class TriggerBot extends Module {
     }
 
     /**
-     * Reaction Time рассчитывается один раз при появлении цели.
+     * Вычисляет Reaction Time.
      */
     private long calculateReactionDelay() {
+        if ("None".equals(cooldownMode.getMode())) {
+            return 0L;
+        }
+
         double delay = MathUtils.randomDoubleBetween(
                 reactionTime.getMinValue(),
                 reactionTime.getMaxValue()
         );
 
-        switch (cooldownMode.getMode()) {
-            case "Smart" -> {
-                if (mc.player != null && target != null) {
-                    double distance = mc.player.distanceTo(target);
+        /*
+         * Smart:
+         * на близкой дистанции уменьшаем задержку.
+         *
+         * Важно:
+         * здесь НЕ используется (long) multiplier,
+         * потому что (long) 0.66 == 0.
+         */
+        if ("Smart".equals(cooldownMode.getMode())
+                && mc.player != null
+                && target != null) {
 
-                    /*
-                     * Чем ближе цель, тем меньше дополнительная
-                     * реакционная задержка.
-                     */
-                    if (distance < 1.5) {
-                        delay *= 0.66;
-                    }
-                }
-            }
+            double distance = mc.player.distanceTo(target);
 
-            case "None" -> delay = 0;
-
-            case "Strict" -> {
-                /*
-                 * Ничего дополнительно не уменьшаем.
-                 */
+            if (distance < 1.5) {
+                delay *= 0.66;
             }
         }
 
@@ -337,14 +347,14 @@ public final class TriggerBot extends Module {
     }
 
     /**
-     * Проверка Reaction Time.
+     * Проверяет Reaction Time.
      */
     private boolean isReactionReady() {
         if (!waitingForReaction) {
             return true;
         }
 
-        if (currentReactionDelay <= 0) {
+        if (currentReactionDelay <= 0L) {
             waitingForReaction = false;
             return true;
         }
@@ -358,36 +368,63 @@ public final class TriggerBot extends Module {
     }
 
     /**
-     * Проверяет выбранный Crit Mode.
+     * Логика Crit Mode.
      */
-    private boolean canAttackAccordingToCritMode() {
-        String mode = critMode.getMode();
+    private boolean canAttackByCritMode() {
 
-        switch (mode) {
-            case "Only Crits":
-                return canCrit();
+        return switch (critMode.getMode()) {
 
-            case "Smart Crits":
-                /*
-                 * Если игрок уже находится в настоящем критическом
-                 * состоянии — атакуем как крит.
-                 *
-                 * Если критического состояния нет, Smart Crits
-                 * разрешает обычную атаку при готовом cooldown.
-                 */
-                return true;
+            /*
+             * Обычный TriggerBot.
+             */
+            case "Off" -> true;
 
-            case "Off":
-            default:
-                return true;
-        }
+            /*
+             * Только настоящий крит.
+             */
+            case "Only Crits" -> canCrit();
+
+            /*
+             * Smart Crits:
+             *
+             * если игрок сейчас падает и крит возможен —
+             * разрешаем атаку.
+             *
+             * если критического состояния нет —
+             * разрешаем обычную атаку после cooldown.
+             */
+            case "Smart Crits" -> true;
+
+            default -> true;
+        };
     }
 
     /**
-     * Проверяет, может ли текущая атака быть критической
-     * по обычным игровым условиям.
+     * Проверка настоящего критического состояния.
+     *
+     * Важный момент:
+     * игрок должен НЕ быть на земле и уже ДВИГАТЬСЯ ВНИЗ.
+     *
+     * Поэтому работает:
+     *
+     * jump
+     * ↓
+     * подъём — нет
+     * ↓
+     * вершина — нет
+     * ↓
+     * падение — ДА
+     *
+     * И также:
+     *
+     * стоял на блоке
+     * ↓
+     * сошёл с края
+     * ↓
+     * падение — ДА
      */
     private boolean canCrit() {
+
         if (mc.player == null) {
             return false;
         }
@@ -400,38 +437,50 @@ public final class TriggerBot extends Module {
         }
 
         /*
-         * Во время подъёма прыжка крит не делаем.
+         * Игрок должен именно падать.
          */
-        if (mc.player.getVelocity().y >= 0.0) {
+        if (mc.player.getVelocity().y >= 0.0D) {
             return false;
         }
 
         /*
-         * Должно быть фактическое падение.
+         * Нужна минимальная высота падения.
          */
-        if (mc.player.fallDistance <= 0.065f) {
+        if (mc.player.fallDistance <= 0.065F) {
             return false;
         }
 
         /*
-         * Состояния, при которых обычный крит невозможен.
+         * Нельзя критовать при лазании.
          */
         if (mc.player.isClimbing()) {
             return false;
         }
 
-        if (mc.player.isInLava()) {
-            return false;
-        }
-
+        /*
+         * В воде крит невозможен.
+         */
         if (mc.player.isTouchingWater()) {
             return false;
         }
 
+        /*
+         * В лаве крит невозможен.
+         */
+        if (mc.player.isInLava()) {
+            return false;
+        }
+
+        /*
+         * Blindness блокирует крит.
+         */
         if (mc.player.hasStatusEffect(StatusEffects.BLINDNESS)) {
             return false;
         }
 
+        /*
+         * На транспорте крит невозможен.
+         */
         if (mc.player.getVehicle() != null) {
             return false;
         }
@@ -440,9 +489,10 @@ public final class TriggerBot extends Module {
     }
 
     /**
-     * Проверяет cooldown оружия.
+     * Проверка cooldown.
      */
     private boolean hasElapsedDelay() {
+
         if (mc.player == null) {
             return false;
         }
@@ -450,94 +500,130 @@ public final class TriggerBot extends Module {
         Item heldItem = mc.player.getMainHandStack().getItem();
 
         /*
-         * Если cooldown mode = None,
-         * cooldown вообще не блокирует атаку.
+         * None = не проверяем cooldown.
          */
         if ("None".equals(cooldownMode.getMode())) {
             return true;
         }
 
-        float cooldown = mc.player.getAttackCooldownProgress(0.0f);
+        float cooldown = mc.player.getAttackCooldownProgress(0.0F);
 
+        /*
+         * Топор.
+         */
         if (heldItem instanceof AxeItem) {
-            return checkAxeCooldown(cooldown);
+
+            if (currentAxeThreshold < 0.0F) {
+                currentAxeThreshold = randomThreshold(
+                        axeThreshold.getMinValue(),
+                        axeThreshold.getMaxValue()
+                );
+            }
+
+            if (currentAxePostDelay < 0.0F) {
+                currentAxePostDelay = randomThreshold(
+                        axePostDelay.getMinValue(),
+                        axePostDelay.getMaxValue()
+                );
+            }
+
+            /*
+             * Сначала ждём cooldown.
+             */
+            if (cooldown < currentAxeThreshold) {
+                waitingForDelay = false;
+                axeTimer.reset();
+                return false;
+            }
+
+            /*
+             * Cooldown готов.
+             * Запускаем Post Delay.
+             */
+            if (!waitingForDelay) {
+                waitingForDelay = true;
+                axeTimer.reset();
+                return false;
+            }
+
+            /*
+             * Ждём Axe Post Delay.
+             */
+            if (!axeTimer.hasElapsedTime(
+                    Math.max(0L, Math.round(currentAxePostDelay)),
+                    true
+            )) {
+                return false;
+            }
+
+            waitingForDelay = false;
+
+            /*
+             * После атаки threshold будет создан заново.
+             */
+            currentAxeThreshold = -1.0F;
+            currentAxePostDelay = -1.0F;
+
+            return true;
         }
 
+        /*
+         * Меч.
+         */
         if (heldItem instanceof SwordItem) {
-            return checkSwordCooldown(cooldown);
-        }
 
-        return true;
-    }
+            if (currentSwordThreshold < 0.0F) {
+                currentSwordThreshold = randomThreshold(
+                        swordThreshold.getMinValue(),
+                        swordThreshold.getMaxValue()
+                );
+            }
 
-    private boolean checkSwordCooldown(float cooldown) {
-        /*
-         * Threshold создаётся при начале цикла.
-         */
-        if (currentSwordThreshold < 0.0f) {
-            currentSwordThreshold = randomThreshold(
-                    swordThreshold.getMinValue(),
-                    swordThreshold.getMaxValue()
-            );
-        }
-
-        if (cooldown < currentSwordThreshold) {
-            return false;
-        }
-
-        return true;
-    }
-
-    private boolean checkAxeCooldown(float cooldown) {
-        if (currentAxeThreshold < 0.0f) {
-            currentAxeThreshold = randomThreshold(
-                    axeThreshold.getMinValue(),
-                    axeThreshold.getMaxValue()
-            );
-        }
-
-        if (currentAxePostDelay < 0.0f) {
-            currentAxePostDelay = randomThreshold(
-                    axePostDelay.getMinValue(),
-                    axePostDelay.getMaxValue()
-            );
+            return cooldown >= currentSwordThreshold;
         }
 
         /*
-         * Сначала ждём cooldown.
+         * Если Only Sword or Axe выключен,
+         * разрешаем остальные предметы.
          */
-        if (cooldown < currentAxeThreshold) {
-            axeDelayStarted = false;
-            axeTimer.reset();
-            return false;
-        }
-
-        /*
-         * Cooldown готов — запускаем Post Delay.
-         */
-        if (!axeDelayStarted) {
-            axeDelayStarted = true;
-            axeTimer.reset();
-            return false;
-        }
-
-        /*
-         * Теперь ждём заданную задержку.
-         */
-        if (!axeTimer.hasElapsedTime(
-                Math.max(0L, Math.round(currentAxePostDelay)),
-                true
-        )) {
-            return false;
-        }
-
         return true;
     }
 
     /**
-     * Проверка, что прицел всё ещё на конкретной сущности.
+     * Случайное значение в заданном диапазоне.
+     */
+    private float randomThreshold(double min, double max) {
+        return (float) MathUtils.randomDoubleBetween(min, max);
+    }
+
+    /**
+     * Проверка оружия.
+     */
+    private boolean isHoldingSwordOrAxe() {
+
+        if (!useOnlySwordOrAxe.getValue()) {
+            return true;
+        }
+
+        if (mc.player == null) {
+            return false;
+        }
+
+        Item item = mc.player.getMainHandStack().getItem();
+
+        return item instanceof SwordItem || item instanceof AxeItem;
+    }
+
+    /**
+     * Проверяет, что прицел всё ещё на нужной сущности.
+     *
+     * Здесь НЕ имеет значения, смотрит сама модель игрока
+     * вперёд, назад или боком.
+     *
+     * Важно только, что твой raycast попал в его хитбокс.
      */
     private boolean isCrosshairTarget(Entity entity) {
+
         if (entity == null) {
             return false;
         }
@@ -553,6 +639,7 @@ public final class TriggerBot extends Module {
      * Same Player.
      */
     private boolean samePlayerCheck(Entity entity) {
+
         if (!samePlayer.getValue()) {
             return true;
         }
@@ -571,52 +658,40 @@ public final class TriggerBot extends Module {
         return lastTargetUUID.equals(uuid);
     }
 
-    private float randomThreshold(double min, double max) {
-        return (float) MathUtils.randomDoubleBetween(min, max);
-    }
-
-    private boolean isHoldingSwordOrAxe() {
-        if (!useOnlySwordOrAxe.getValue()) {
-            return true;
-        }
-
-        if (mc.player == null) {
-            return false;
-        }
-
-        Item item = mc.player.getMainHandStack().getItem();
-
-        return item instanceof AxeItem || item instanceof SwordItem;
-    }
-
     /**
-     * Выполняет обычную атаку клиента.
+     * Атака.
      */
     public void attack() {
+
         if (mc.player == null || target == null) {
             return;
         }
 
+        /*
+         * Перед атакой ещё раз проверяем прицел.
+         */
         if (!isCrosshairTarget(target)) {
-            resetState();
             return;
         }
 
         ((MinecraftClientAccessor) mc).invokeDoAttack();
 
         /*
-         * После атаки начинаем новый attack cycle.
+         * Сбрасываем состояние атаки.
          */
         waitingForReaction = false;
+        waitingForDelay = false;
 
-        currentSwordThreshold = -1.0f;
-        currentAxeThreshold = -1.0f;
-        currentAxePostDelay = -1.0f;
-
-        axeDelayStarted = false;
-
-        axeTimer.reset();
         reactionTimer.reset();
+        timer.reset();
+        axeTimer.reset();
+
+        /*
+         * Следующий удар получит новый threshold.
+         */
+        currentSwordThreshold = -1.0F;
+        currentAxeThreshold = -1.0F;
+        currentAxePostDelay = -1.0F;
 
         if (samePlayer.getValue()) {
             lastTargetUUID = target.getUuidAsString();
@@ -624,10 +699,11 @@ public final class TriggerBot extends Module {
     }
 
     /**
-     * Проверяет, является ли сущность допустимой целью.
+     * Проверка цели.
      */
-    public boolean hasTarget(Entity entity) {
-        if (entity == null) {
+    public boolean hasTarget(Entity en) {
+
+        if (en == null) {
             return false;
         }
 
@@ -635,42 +711,63 @@ public final class TriggerBot extends Module {
             return false;
         }
 
-        if (entity == mc.player || entity == mc.cameraEntity) {
+        if (en == mc.player || en == mc.cameraEntity) {
             return false;
         }
 
-        if (!entity.isAlive()) {
+        if (!en.isAlive()) {
             return false;
         }
 
-        if (entity instanceof PlayerEntity player
+        /*
+         * Friends.
+         */
+        if (en instanceof PlayerEntity player
                 && FriendManager.isFriend(player.getUuid())) {
             return false;
         }
 
-        if (Teams.isTeammate(entity)) {
+        /*
+         * Teams.
+         */
+        if (Teams.isTeammate(en)) {
             return false;
         }
 
-        if (entity instanceof WindChargeEntity) {
+        /*
+         * Wind Charge.
+         */
+        if (en instanceof WindChargeEntity) {
             return false;
         }
 
-        if (entity instanceof EndCrystalEntity
+        /*
+         * Crystals.
+         */
+        if (en instanceof EndCrystalEntity
                 && ignoreCrystals.getValue()) {
             return false;
         }
 
-        if (entity instanceof Tameable) {
+        /*
+         * Tamed entities.
+         */
+        if (en instanceof Tameable) {
             return false;
         }
 
-        if (entity instanceof PassiveEntity
+        /*
+         * Passive mobs.
+         */
+        if (en instanceof PassiveEntity
                 && ignorePassiveMobs.getValue()) {
             return false;
         }
 
-        if (ignoreInvisible.getValue() && entity.isInvisible()) {
+        /*
+         * Invisible.
+         */
+        if (ignoreInvisible.getValue() && en.isInvisible()) {
             return false;
         }
 
@@ -678,45 +775,50 @@ public final class TriggerBot extends Module {
     }
 
     /**
-     * Полный сброс состояния.
+     * Полный сброс.
      */
     private void resetState() {
+
         target = null;
 
         waitingForReaction = false;
+        waitingForDelay = false;
 
         currentReactionDelay = 0L;
 
-        currentSwordThreshold = -1.0f;
-        currentAxeThreshold = -1.0f;
-        currentAxePostDelay = -1.0f;
-
-        axeDelayStarted = false;
+        currentSwordThreshold = -1.0F;
+        currentAxeThreshold = -1.0F;
+        currentAxePostDelay = -1.0F;
 
         reactionTimer.reset();
+        timer.reset();
         axeTimer.reset();
     }
 
     /**
-     * Сбрасывает только текущий attack cycle,
-     * не уничтожая информацию о цели.
+     * Сброс текущего цикла без удаления lastTargetUUID.
      */
-    private void resetAttackCycle() {
+    private void resetAttackState() {
+
         waitingForReaction = false;
+        waitingForDelay = false;
 
-        currentSwordThreshold = -1.0f;
-        currentAxeThreshold = -1.0f;
-        currentAxePostDelay = -1.0f;
+        currentReactionDelay = 0L;
 
-        axeDelayStarted = false;
+        currentSwordThreshold = -1.0F;
+        currentAxeThreshold = -1.0F;
+        currentAxePostDelay = -1.0F;
 
         reactionTimer.reset();
+        timer.reset();
         axeTimer.reset();
     }
 
     @Override
     public void onEnable() {
+
         resetState();
+
         lastTargetUUID = null;
 
         super.onEnable();
@@ -724,7 +826,9 @@ public final class TriggerBot extends Module {
 
     @Override
     public void onDisable() {
+
         resetState();
+
         lastTargetUUID = null;
 
         super.onDisable();
