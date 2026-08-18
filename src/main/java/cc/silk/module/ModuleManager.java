@@ -79,12 +79,10 @@ public final class ModuleManager {
                 new ArrayList(), new Trajectories());
 
         // Misc
-        add(
-                 // Misc
 add(
-    new CartKey(), new HoverTotem(), new MiddleClickFriend(),
-    new PearlKey(), new PearlCatch(), new WindChargeKey(), new Teams(), new FakePlayer(),
-    new Friends(), new ChestStealer());
+        new CartKey(), new HoverTotem(), new MiddleClickFriend(),
+        new PearlKey(), new PearlCatch(), new WindChargeKey(), new Teams(), new FakePlayer(),
+        new Friends(), new ChestStealer());
 
         // Client
         add(new NewClickGUIModule(), new ClientSettingsModule(), new Client(), new Debugger(),
